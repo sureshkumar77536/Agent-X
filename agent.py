@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
   ────────────────────────────────────────────────────────
-    ⚡ AGENT-X :: S-CLASS INFINITE LOOP EDITION v2 ⚡
-    True Autonomy | Smart Tool Detection | Auto-Continue
+    ⚡ AGENT-X v3 :: SMART AGENTIC LOOP ⚡
+    True Autonomy | Smart Tool Detection | No Fake Tools
   ────────────────────────────────────────────────────────
 """
 
@@ -66,11 +66,10 @@ CFG = {
     "verbose": True
 }
 
-# Auto-continue state
-AUTO = {
-    "remaining": 0,
-    "template": "continue"
-}
+AUTO = {"remaining": 0, "template": "continue"}
+
+# Track if this is a new conversation
+IS_NEW_TASK = True
 
 SYSTEM = """You are AGENT-X, an elite, fully autonomous AI on a Linux terminal.
 
@@ -80,10 +79,11 @@ You have EXACTLY TWO tools available:
 2. **web_browse** - Scrape text content from a URL, bypassing bot protections
 
 CRITICAL RULES:
-1. You MUST call tools to actually DO things. Planning is not enough.
-2. Use NATIVE JSON tool calling if the API supports it.
-3. If JSON tools don't work, use these EXACT markdown formats:
+1. ONLY use tools when the user's request ACTUALLY requires them.
+2. For greetings (hi, hello, hey) or simple questions - just respond normally, NO tools needed.
+3. Use tools when user asks to: scan, analyze, investigate, fetch, check, run commands, etc.
 
+4. Tool formats:
    ```bash
    ls -la
    ```
@@ -92,24 +92,13 @@ CRITICAL RULES:
    https://example.com
    ```
 
-4. DO NOT invent tools like "shell_command", "run_command", "execute", etc.
-   The ONLY valid tool names are: bash, web_browse
+5. DO NOT invent tools. Only "bash" and "web_browse" exist.
 
-5. When user asks for analysis or investigation, you MUST actually use tools.
-   Example workflow:
-   - Run bash command to gather info
-   - READ the output carefully
-   - Decide next step based on output
-   - Continue until task is FULLY complete
+6. When user asks for analysis/investigation:
+   - Run tool → Read output → Decide next step → Continue until FULLY complete
+   - Only give final summary AFTER you have real data
 
-6. DO NOT say "task completed" or "operation concluded" until you have
-   actually executed tools and shown real results.
-
-7. After each tool execution, analyze the result and decide if more tools needed.
-
-8. Only give a final summary AFTER you have real data from tool executions.
-
-9. If you need to run multiple commands, run them ONE AT A TIME and check output.
+7. DO NOT say "task completed" until you have actually executed tools and shown real results.
 """
 
 TOOLS = [
@@ -188,7 +177,6 @@ def dispatch_tool(name: str, args: dict) -> str:
         return run_bash(args.get("command", ""))
     if name == "web_browse":
         return run_web_browse(args.get("url", ""))
-    # hallucinated tool - give helpful error
     return f"""[ERROR] Tool '{name}' does not exist!
 
 You ONLY have these tools:
@@ -225,30 +213,18 @@ def api_call(messages: List[Dict]) -> Dict:
     r.raise_for_status()
     return r.json()
 
-# ------------ IMPROVED FALLBACK PARSER ------------
+# ------------ FALLBACK PARSER ------------
 def extract_fallback_tools(content: str) -> List[Dict]:
-    """
-    Detects tools from various markdown/text formats:
-    - ```bash ... ```
-    - ```web_browse ... ```
-    - ```tool_code bash ... ```
-    - JSON blocks with "command" or "tool_code" keys
-    - shell_command("...")
-    - web_browse("...")
-    """
-    tools: List[Dict] = []
+    tools = []
     
-    # 1. ```bash ... ``` or ```sh ... ```
+    # 1. ```bash ... ```
     for match in re.finditer(r'```(?:bash|sh)\s*\n(.*?)\n```', content, re.DOTALL | re.IGNORECASE):
         cmd = match.group(1).strip()
         if cmd:
             tools.append({
                 "id": f"call_{uuid.uuid4().hex[:8]}",
                 "type": "function",
-                "function": {
-                    "name": "bash",
-                    "arguments": json.dumps({"command": cmd})
-                }
+                "function": {"name": "bash", "arguments": json.dumps({"command": cmd})}
             })
     
     # 2. ```web_browse ... ```
@@ -258,10 +234,7 @@ def extract_fallback_tools(content: str) -> List[Dict]:
             tools.append({
                 "id": f"call_{uuid.uuid4().hex[:8]}",
                 "type": "function",
-                "function": {
-                    "name": "web_browse",
-                    "arguments": json.dumps({"url": url})
-                }
+                "function": {"name": "web_browse", "arguments": json.dumps({"url": url})}
             })
     
     # 3. ```tool_code bash ... ```
@@ -271,52 +244,54 @@ def extract_fallback_tools(content: str) -> List[Dict]:
             tools.append({
                 "id": f"call_{uuid.uuid4().hex[:8]}",
                 "type": "function",
-                "function": {
-                    "name": "bash",
-                    "arguments": json.dumps({"command": cmd})
-                }
+                "function": {"name": "bash", "arguments": json.dumps({"command": cmd})}
             })
     
-    # 4. JSON blocks with command/tool_code/shell_command
+    # 4. JSON blocks
     for match in re.finditer(r'```(?:tool_code|json)?\s*\n(\{.*?\})\s*\n```', content, re.DOTALL | re.IGNORECASE):
         json_str = match.group(1).strip()
         try:
             obj = json.loads(json_str)
-            
-            # Check for various key names
             cmd = None
+            url = None
+            
             if "command" in obj:
                 cmd = obj["command"]
+            elif "url" in obj:
+                url = obj["url"]
             elif "input" in obj and isinstance(obj["input"], dict):
                 if "command" in obj["input"]:
                     cmd = obj["input"]["command"]
-            elif "tool_code" in obj and obj.get("tool_code") in ["shell_command", "bash", "run_command"]:
-                if "input" in obj and isinstance(obj["input"], dict) and "command" in obj["input"]:
-                    cmd = obj["input"]["command"]
+                if "url" in obj["input"]:
+                    url = obj["input"]["url"]
+            elif "tool_code" in obj:
+                if obj.get("tool_code") in ["shell_command", "bash", "run_command"]:
+                    if "input" in obj and isinstance(obj["input"], dict) and "command" in obj["input"]:
+                        cmd = obj["input"]["command"]
             
             if cmd:
                 tools.append({
                     "id": f"call_{uuid.uuid4().hex[:8]}",
                     "type": "function",
-                    "function": {
-                        "name": "bash",
-                        "arguments": json.dumps({"command": cmd})
-                    }
+                    "function": {"name": "bash", "arguments": json.dumps({"command": cmd})}
+                })
+            if url:
+                tools.append({
+                    "id": f"call_{uuid.uuid4().hex[:8]}",
+                    "type": "function",
+                    "function": {"name": "web_browse", "arguments": json.dumps({"url": url})}
                 })
         except json.JSONDecodeError:
             pass
     
-    # 5. Inline: shell_command("...") or run_command("...")
+    # 5. Inline: shell_command("...")
     for match in re.finditer(r'(?:shell_command|run_command|execute)\s*\(\s*["\']([^"\']+)["\']\s*\)', content):
         cmd = match.group(1).strip()
         if cmd:
             tools.append({
                 "id": f"call_{uuid.uuid4().hex[:8]}",
                 "type": "function",
-                "function": {
-                    "name": "bash",
-                    "arguments": json.dumps({"command": cmd})
-                }
+                "function": {"name": "bash", "arguments": json.dumps({"command": cmd})}
             })
     
     # 6. Inline: web_browse("...")
@@ -326,14 +301,11 @@ def extract_fallback_tools(content: str) -> List[Dict]:
             tools.append({
                 "id": f"call_{uuid.uuid4().hex[:8]}",
                 "type": "function",
-                "function": {
-                    "name": "web_browse",
-                    "arguments": json.dumps({"url": url})
-                }
+                "function": {"name": "web_browse", "arguments": json.dumps({"url": url})}
             })
     
     # Remove duplicates
-    unique: List[Dict] = []
+    unique = []
     seen = set()
     for t in tools:
         sig = t["function"]["name"] + t["function"]["arguments"]
@@ -345,30 +317,28 @@ def extract_fallback_tools(content: str) -> List[Dict]:
 
 # ------------ COMMAND HANDLING ------------
 def handle_commands(user_input: str, history: List[Dict]) -> bool:
+    global IS_NEW_TASK
     cmd = user_input.split()
     if not cmd:
         return False
     
-    # /exit
     if cmd[0] == "/exit":
         console.print("  [system]⏻ Terminating session...[/system]\n")
         sys.exit(0)
     
-    # /new
     if cmd[0] == "/new":
         history.clear()
         history.append({"role": "system", "content": SYSTEM})
         AUTO["remaining"] = 0
+        IS_NEW_TASK = True
         console.print("  [success]↻ Memory wiped. Ready for new task.[/success]\n")
         return True
     
-    # /model base_url model_name
     if cmd[0] == "/model" and len(cmd) >= 3:
         CFG["base_url"], CFG["model"] = cmd[1], cmd[2]
         console.print(f"  [system]⚙ Config updated -> {CFG['model']}[/system]\n")
         return True
     
-    # /continue-N  → N auto messages "continue"
     if cmd[0].startswith("/continue"):
         parts = cmd[0].split("-")
         if len(parts) == 2 and parts[1].isdigit():
@@ -377,13 +347,11 @@ def handle_commands(user_input: str, history: List[Dict]) -> bool:
             console.print(f"  [system]▶ Auto-continue armed for {AUTO['remaining']} steps.[/system]\n")
             return True
     
-    # /verbose
     if cmd[0] == "/verbose":
         CFG["verbose"] = not CFG["verbose"]
         console.print(f"  [system]Verbose mode: {CFG['verbose']}[/system]\n")
         return True
     
-    # /help
     if cmd[0] == "/help":
         table = Table(title="Available Commands", border_style="cyan")
         table.add_column("Command", style="cyan")
@@ -399,30 +367,92 @@ def handle_commands(user_input: str, history: List[Dict]) -> bool:
     
     return False
 
+# ------------ CHECK IF TASK NEEDS TOOLS ------------
+def task_requires_tools(user_msg: str) -> bool:
+    """
+    Check if the user's message actually requires tool execution.
+    Returns True if tools are needed, False for simple chat.
+    """
+    msg_lower = user_msg.lower().strip()
+    
+    # Greetings - no tools needed
+    greetings = ["hi", "hii", "hiii", "hello", "hey", "yo", "sup", "howdy", "namaste", " Salaam", "good morning", "good evening", "good afternoon"]
+    if msg_lower in greetings:
+        return False
+    
+    # Short messages that are clearly chat
+    if len(msg_lower.split()) <= 2 and not any(c in msg_lower for c in ["$", ">", "|", "&"]):
+        # Check if it's just a greeting or acknowledgment
+        chat_words = ["ok", "okay", "thanks", "thank", "yes", "no", "sure", "done", "cool", "nice", "great", "awesome"]
+        if msg_lower in chat_words:
+            return False
+    
+    # Questions that don't need tools (general knowledge)
+    general_questions = ["who are you", "what can you do", "what is your name", "how are you", "what's up"]
+    if any(q in msg_lower for q in general_questions):
+        return False
+    
+    # Action keywords that REQUIRE tools
+    action_keywords = [
+        "scan", "analyze", "analyse", "check", "fetch", "get", "run", "execute",
+        "investigate", "explore", "find", "search", "lookup", "download",
+        "install", "remove", "delete", "create", "make", "build", "compile",
+        "test", "debug", "fix", "hack", "exploit", "enum", "enumerate",
+        "curl", "wget", "nmap", "python", "bash", "shell", "terminal",
+        "command", "script", "file", "directory", "folder", "list files",
+        "show me", "give me", "tell me about", "what is in", "read the",
+        "cat ", "ls ", "grep ", "find ", "open ", "visit", "browse",
+        "website", "url", "http", "api", "endpoint", "server"
+    ]
+    
+    if any(kw in msg_lower for kw in action_keywords):
+        return True
+    
+    # Contains command-like syntax ($, |, >, &)
+    if any(c in user_msg for c in ["$", "|", ">", "&", "./", "~/", "/"]):
+        return True
+    
+    # Contains code-like patterns
+    if "```" in user_msg or "`" in user_msg:
+        return True
+    
+    # Default: doesn't need tools (simple chat)
+    return False
+
 # ------------ CHECK IF SHOULD CONTINUE ------------
-def should_continue(content: str, tool_calls: List[Dict], iteration: int, total_tools_executed: int) -> tuple[bool, str]:
+def should_continue(content: str, tool_calls: List[Dict], iteration: int, total_tools_executed: int, needs_tools: bool) -> tuple:
     """
     Decide if agent should continue looping.
     Returns (should_continue, reason)
     """
-    # If we have tool calls, we MUST continue
+    # If we have tool calls, execute them
     if tool_calls:
         return True, "tools_detected"
     
-    # If no content, continue (weird state)
+    # If no content, just stop
     if not content:
-        return True, "no_content"
+        return False, "no_content"
     
     low = content.lower()
     
-    # Completion phrases - only stop if these are present AND we've executed tools
+    # If task doesn't need tools, just respond normally
+    if not needs_tools:
+        # Check if AI is done responding
+        completion_phrases = ["task completed", "operation concluded", "done", "finished", "that's all"]
+        if any(phrase in low for phrase in completion_phrases):
+            return False, "chat_complete"
+        # If we've had one response without tools for a chat message, we're done
+        return False, "chat_response"
+    
+    # FOR TASKS THAT NEED TOOLS:
+    
+    # Completion phrases - only stop if tools were actually executed
     completion_phrases = [
         "task completed", "task is complete", "operation concluded",
         "here is the final", "final answer", "in conclusion",
         "to summarize", "summary:", "i have completed", "done", "finished"
     ]
     
-    # If we see completion phrases
     if any(phrase in low for phrase in completion_phrases):
         # If no tools executed yet, this is fake completion
         if total_tools_executed == 0:
@@ -434,29 +464,39 @@ def should_continue(content: str, tool_calls: List[Dict], iteration: int, total_
     # Check for planning-only language
     planning_phrases = [
         "i will", "i'm going to", "let me", "i'll start",
-        "i need to", "first, i'll", "i should", "i can help",
-        "i would", "i could", "i plan to"
+        "i need to", "first, i'll", "i should", "i can help"
     ]
     
     if any(phrase in low for phrase in planning_phrases):
-        return True, "planning_phase"
+        # Only prompt for action if we haven't executed any tools yet
+        if total_tools_executed == 0:
+            return True, "planning_phase"
+        return True, "still_planning"
     
     # If we've executed tools but AI is still talking, let it finish
     if total_tools_executed > 0 and iteration > 3:
-        # Check if it's wrapping up
         if len(content) < 100:  # Short message, probably done
             return False, "short_message_after_tools"
     
-    # Default: continue for a few iterations to ensure we're not stuck
-    if iteration < 3:
-        return True, "early_iteration"
+    # Default for tool-requiring tasks
+    if iteration < 3 and total_tools_executed == 0:
+        return True, "need_tools"
     
     return False, "default_stop"
 
 # ------------ CORE AGENT LOOP ------------
 def agent(user_msg: str, history: List[Dict]):
+    global IS_NEW_TASK
+    
     if handle_commands(user_msg, history):
         return
+    
+    # Check if this task needs tools
+    needs_tools = task_requires_tools(user_msg)
+    
+    # Mark as no longer new task after first message
+    if IS_NEW_TASK:
+        IS_NEW_TASK = False
     
     history.append({"role": "user", "content": user_msg})
     
@@ -484,7 +524,6 @@ def agent(user_msg: str, history: List[Dict]):
             msg = resp["choices"][0]["message"]
         except (KeyError, IndexError, TypeError):
             console.print("\n  [error]✗ API Response format unexpected.[/error]\n")
-            console.print(f"  [dim]{resp}[/dim]")
             return
         
         content = msg.get("content") or ""
@@ -503,13 +542,12 @@ def agent(user_msg: str, history: List[Dict]):
         
         # SHOW AI THOUGHTS (cleaned text)
         if content and CFG["verbose"]:
-            # Remove code blocks for display
             clean = re.sub(r'```.*?```', '', content, flags=re.DOTALL).strip()
             if clean:
                 console.print(
                     Panel(
                         clean[:800] + ("..." if len(clean) > 800 else ""),
-                        title="[bold white]🤖 AGENT-X[/bold white]",
+                        title="[bold white]🤖 AGENT-X[/bold koonwhite]",
                         border_style="white",
                         padding=(0, 2)
                     )
@@ -517,16 +555,17 @@ def agent(user_msg: str, history: List[Dict]):
         
         # NO TOOLS: decide whether to stop or keep looping
         if not tool_calls:
-            should_cont, reason = should_continue(content, tool_calls, loop_n, total_tools_executed)
+            should_cont, reason = should_continue(content, tool_calls, loop_n, total_tools_executed, needs_tools)
             
             if not should_cont:
-                console.print(f"  [success]✓ Task completed in {loop_n} iterations ({total_tools_executed} tools executed)[/success]\n")
+                if CFG["verbose"]:
+                    console.print(f"  [success]✓ Done ({reason})[/success]\n")
                 
                 # Show final summary if available
                 if content and not CFG["verbose"]:
                     clean = re.sub(r'```.*?```', '', content, flags=re.DOTALL).strip()
                     if clean:
-                        console.print(Panel(clean[:500], title="[bold green]Final Summary[/bold green]", border_style="green"))
+                        console.print(Panel(clean[:500], title="[bold green]Response[/bold green]", border_style="green"))
                 
                 # Auto-follow-up
                 time.sleep(1)
@@ -538,20 +577,25 @@ def agent(user_msg: str, history: List[Dict]):
             else:
                 consecutive_no_tools += 1
                 
-                # Force the AI to actually do something
-                if consecutive_no_tools >= 2 and loop_n < 5:
+                # Only prompt AI to execute tools if:
+                # 1. Task actually needs tools
+                # 2. We haven't executed any yet
+                # 3. AI is in planning phase or faking completion
+                if needs_tools and total_tools_executed == 0 and reason in ["fake_completion_no_tools", "planning_phase", "need_tools"]:
                     if CFG["verbose"]:
-                        console.print(f"  [warning]⚠ No tools detected ({reason}), prompting AI to execute...[/warning]")
+                        console.print(f"  [warning]⚠ Prompting AI to execute tools...[/warning]")
                     history.append({
                         "role": "user",
-                        "content": "CRITICAL: You have not executed any tools yet. Use bash or web_browse to actually DO something. DO NOT just plan - EXECUTE a command now."
+                        "content": "CRITICAL: This task requires tool execution. Use bash or web_browse to actually DO something. DO NOT just plan - EXECUTE a command now."
                     })
                     continue
                 elif consecutive_no_tools >= 3:
-                    console.print(f"  [error]✗ Agent stuck after {loop_n} iterations without tool use.[/error]\n")
+                    # Stuck without tools
+                    if needs_tools:
+                        console.print(f"  [error]✗ Agent stuck after {loop_n} iterations without tool use.[/error]\n")
                     return
         else:
-            consecutive_no_tools = 0  # Reset counter
+            consecutive_no_tools = 0
         
         # TOOL EXECUTION PHASE
         for tc in tool_calls:
@@ -615,7 +659,7 @@ def agent(user_msg: str, history: List[Dict]):
 # ------------ MAIN ------------
 if __name__ == "__main__":
     console.print("\n[bold white]  ────────────────────────────────────────────────────────[/bold white]")
-    console.print("[bold cyan]    ⚡ AGENT-X :: S-CLASS INFINITE LOOP EDITION v2 ⚡[/bold cyan]")
+    console.print("[bold cyan]    ⚡ AGENT-X v3 :: SMART AGENTIC LOOP ⚡[/bold cyan]")
     console.print("[bold white]  ────────────────────────────────────────────────────────[/bold white]\n")
     
     CFG["base_url"] = Prompt.ask("  [system]◈[/system] Base URL", default="http://localhost:11434/v1").strip()
@@ -639,3 +683,5 @@ if __name__ == "__main__":
         
         if user_input:
             agent(user_input, history)
+```
+
