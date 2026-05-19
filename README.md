@@ -11,7 +11,7 @@ Agent-X is an elite, autonomous AI CLI agent equipped with full terminal access,
 
 ## 🛠️ Installation
 ```bash
-git clone [https://github.com/sureshkumar77536/Agent-X.git](https://github.com/sureshkumar77536/Agent-X.git)
+git clone https://github.com/sureshkumar77536/Agent-X.git
 cd Agent-X
 pip install -r requirements.txt
 chmod +x agent.py
