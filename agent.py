@@ -2,13 +2,12 @@
 """
   ────────────────────────────────────────────────────────
     ⚡ AGENT-X :: S-CLASS INFINITE LOOP EDITION ⚡
-    True Autonomy | Clean UI | Continuous Execution
+    True Autonomy | Bulletproof API Handling | Pro UI
   ────────────────────────────────────────────────────────
 """
 import json
 import subprocess
 import sys
-import os
 import time
 from typing import List, Dict
 
@@ -36,7 +35,7 @@ except ImportError:
     import requests
     import cloudscraper
 
-# Clean, professional S-Class Theme
+# S-Class Nerd-Font/Terminal Theme
 custom_theme = Theme({
     "system": "dim white",
     "tool": "bold cyan",
@@ -46,7 +45,7 @@ custom_theme = Theme({
 console = Console(theme=custom_theme)
 
 CFG = {
-    "base_url" : "http://localhost:11434/v1", # Update this if using official Anthropic API endpoint
+    "base_url" : "http://localhost:11434/v1",
     "model"    : "claude-3-5-sonnet-20240620",
     "max_iter" : 100, 
     "sleep"    : 1.5  
@@ -152,54 +151,57 @@ def agent(user_msg: str, history: List[Dict]):
     while loop_n < CFG["max_iter"]:
         loop_n += 1
         
-        with Status(f"[bold dim cyan]🧠 Agent-X Thinking (Iter {loop_n})...[/]", spinner="bouncingBar", console=console):
+        with Status(f"[bold dim cyan]⠧ [Agent-X] Processing ⟶ Iteration {loop_n}...[/]", spinner="bouncingBar", console=console):
             try: 
                 resp = api_call(history)
             except Exception as e:
-                console.print(f"\n  [error]✗ Connection Error: {e}[/error]"); return
+                console.print(f"\n  [error]✗ Connection Error: {e}[/error]")
+                return
         
-        msg = resp["choices"]["message"]
+        try:
+            msg = resp["choices"]["message"]
+        except (KeyError, IndexError, TypeError):
+            console.print(f"\n  [error]✗ API Response Error! Got unexpected data:[/error]")
+            console.print(f"  [dim]{resp}[/dim]\n")
+            return
+
         tool_calls = msg.get("tool_calls") or []
         history.append(msg)
 
-        # AI directly talking to you
         if msg.get("content"):
-            console.print(Panel(msg["content"].strip(), title="[bold white]AGENT-X[/bold white]", border_style="white", padding=(0,2)))
+            console.print(Panel(msg["content"].strip(), title="[bold white] 󰚩 AGENT-X [/bold white]", border_style="white", padding=(0,2)))
 
-        # Break loop ONLY if no tools are called (Task actually finished)
         if not tool_calls:
             console.print(f"  [success]✓ Operation concluded in {loop_n} steps.[/success]\n")
             break
 
-        # Execute Tools Continuously
         for tc in tool_calls:
             tc_name = tc["function"]["name"]
             try: tc_args = json.loads(tc["function"]["arguments"])
             except: tc_args = {"command": tc["function"]["arguments"]}
             
-            # Clean Pro UI for command execution
-            console.print(f"\n  [tool]▶ EXEC:[/tool] [bold]{tc_name}[/bold]")
+            icon = "" if tc_name == "bash" else "󰈈"
+            console.print(f"\n  [tool]▶ EXEC:[/tool] [bold]{icon} {tc_name}[/bold]")
             if tc_name == "bash":
                 console.print(Syntax(tc_args.get("command",""), "bash", theme="ansi_dark", padding=(0,2), background_color="default"))
             else:
-                console.print(f"    [dim]{tc_args}[/dim]")
+                console.print(f"    [dim]URL ⟶ {tc_args.get('url', '')}[/dim]")
             
-            with Status(f"[bold yellow]⚙️ Executing {tc_name}...[/]", spinner="dots", console=console):
+            with Status(f"[bold yellow]⠼ Executing {tc_name}...[/]", spinner="dots", console=console):
                 result = dispatch_tool(tc_name, tc_args)
             
             is_err = result.startswith("[ERROR]") or result.startswith("[exit")
             border = "red" if is_err else "cyan"
+            title = "[error]󰅙 STDERR[/error]" if is_err else "[dim]󰄬 STDOUT[/dim]"
             
-            # Show output cleanly
-            console.print(Panel(result[:500] + ("\n...[truncated]" if len(result)>500 else ""), 
-                                title="[error]STDERR[/error]" if is_err else "[dim]STDOUT[/dim]", border_style=border))
+            console.print(Panel(result[:1500] + ("\n...[truncated]" if len(result)>1500 else ""), 
+                                title=title, border_style=border))
             
-            # Feed result back to AI so it continues the loop
             history.append({"role": "tool", "tool_call_id": tc.get("id", f"call_{loop_n}"), "content": result})
 
 if __name__ == "__main__":
     console.print("\n[bold white]  ────────────────────────────────────────────────────────[/bold white]")
-    console.print("[bold cyan]    ⚡ AGENT-X :: S-CLASS INFINITE LOOP EDITION ⚡[/bold cyan]")
+    console.print("[bold cyan]    󰚩 AGENT-X :: S-CLASS INFINITE LOOP EDITION [/bold cyan]")
     console.print("[bold white]  ────────────────────────────────────────────────────────[/bold white]\n")
     
     CFG["base_url"] = Prompt.ask("  [system]◈[/system] Base URL", default="http://localhost:11434/v1").strip()
