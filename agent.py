@@ -2,13 +2,15 @@
 """
   ────────────────────────────────────────────────────────
     ⚡ AGENT-X :: S-CLASS INFINITE LOOP EDITION ⚡
-    True Autonomy | Bulletproof API Handling | Pro UI
+    True Autonomy | Smart Fallback Parser | Pro UI
   ────────────────────────────────────────────────────────
 """
 import json
 import subprocess
 import sys
 import time
+import re
+import uuid
 from typing import List, Dict
 
 def _install_deps():
@@ -53,11 +55,19 @@ CFG = {
 
 SYSTEM = """You are AGENT-X, an elite, fully autonomous AI on a Linux terminal.
 CRITICAL RULES FOR TRUE AGENTIC LOOP:
-1. YOU MUST NEVER WRITE TOOL CALLS AS TEXT OR MARKDOWN (e.g., do not write ````tool_code`). YOU MUST USE THE NATIVE JSON TOOL CALLING API.
-2. If you need to search, read, or execute, use the tools immediately.
-3. NEVER stop after one tool call if the task isn't 100% complete. Analyze the output and chain the next tool call.
-4. If a command fails, automatically run a new command to fix it. 
-5. Only send a regular text response when you have fully achieved the user's end goal after multiple steps.
+1. You MUST use the tools to interact with the system. If you need to search, read, or execute, DO IT.
+2. NATIVE JSON PREFERRED: If the API supports it, use native tool calling.
+3. FALLBACK PRECAUTION: If you cannot use native JSON tools, you must write your tools exactly like this in markdown:
+   For Bash:
+   ```bash
+   ls -la
+   ```
+   For Web Browse:
+   ```web_browse
+   https://example.com
+   ```
+4. NEVER STOP LOOPING. Analyze the terminal/web output, and chain the next tool call immediately.
+5. ONLY give a final summary when you have thoroughly investigated and solved the user's core problem.
 """
 
 TOOLS = [
@@ -65,12 +75,10 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "bash",
-            "description": "Execute terminal commands natively. Use for recon, file reading, nmap, etc.",
+            "description": "Execute terminal commands natively. Use for recon, file reading, nmap, curl, etc.",
             "parameters": {
                 "type": "object",
-                "properties": {
-                    "command": {"type": "string", "description": "The exact shell command."}
-                },
+                "properties": {"command": {"type": "string"}},
                 "required": ["command"]
             }
         }
@@ -82,14 +90,30 @@ TOOLS = [
             "description": "Scrape text content from a URL, bypassing bot protections.",
             "parameters": {
                 "type": "object",
-                "properties": {
-                    "url": {"type": "string"}
-                },
+                "properties": {"url": {"type": "string"}},
                 "required": ["url"]
             }
         }
     }
 ]
+
+def extract_fallback_tools(content: str) -> List[Dict]:
+    """Smart Fallback Parser: Catches tool calls even if AI writes them as plain text or pseudo-code."""
+    tools = []
+    
+    # Catch ```bash ... ```
+    for match in re.finditer(r'```(?:bash|sh)\n(.*?)\n```', content, re.DOTALL | re.IGNORECASE):
+        tools.append({"id": f"call_{uuid.uuid4().hex[:8]}", "type": "function", "function": {"name": "bash", "arguments": json.dumps({"command": match.group(1).strip()})}})
+        
+    # Catch ```web_browse ... ```
+    for match in re.finditer(r'```(?:web_browse)\n(.*?)\n```', content, re.DOTALL | re.IGNORECASE):
+        tools.append({"id": f"call_{uuid.uuid4().hex[:8]}", "type": "function", "function": {"name": "web_browse", "arguments": json.dumps({"url": match.group(1).strip()})}})
+    
+    # Catch pseudo-code like web_browse("https://...") that the model was doing
+    for match in re.finditer(r'web_browse\([\'"](.*?)[\'"]\)', content):
+        tools.append({"id": f"call_{uuid.uuid4().hex[:8]}", "type": "function", "function": {"name": "web_browse", "arguments": json.dumps({"url": match.group(1).strip()})}})
+        
+    return tools
 
 def run_bash(command: str) -> str:
     try:
@@ -115,30 +139,24 @@ def dispatch_tool(name: str, args: dict) -> str:
 
 def api_call(messages: List[Dict]) -> Dict:
     url = CFG["base_url"].rstrip("/") + "/chat/completions"
-    payload = {
-        "model": CFG["model"], 
-        "messages": messages, 
-        "max_tokens": 4096, 
-        "tools": TOOLS, 
-        "tool_choice": "auto"
-    }
+    payload = {"model": CFG["model"], "messages": messages, "max_tokens": 4096, "tools": TOOLS, "tool_choice": "auto"}
     r = requests.post(url, json=payload, headers={"Content-Type":"application/json"}, timeout=180)
     r.raise_for_status()
     return r.json()
 
 def handle_commands(user_input: str, history: List[Dict]) -> bool:
     cmd = user_input.split()
-    if cmd == "/exit":
+    if cmd[0] == "/exit":
         console.print("  [system]⏻ Terminating session...[/system]\n")
         sys.exit(0)
-    elif cmd == "/new":
+    elif cmd[0] == "/new":
         history.clear()
         history.append({"role": "system", "content": SYSTEM})
         console.print("  [success]↻ Memory wiped. Ready for new task.[/success]\n")
         return True
-    elif cmd == "/model":
+    elif cmd[0] == "/model":
         if len(cmd) >= 3:
-            CFG["base_url"], CFG["model"] = cmd, cmd[11][12]
+            CFG["base_url"], CFG["model"] = cmd[1], cmd[2]
             console.print(f"  [system]⚙ Config updated -> {CFG['model']}[/system]\n")
         return True
     return False
@@ -151,7 +169,8 @@ def agent(user_msg: str, history: List[Dict]):
     while loop_n < CFG["max_iter"]:
         loop_n += 1
         
-        with Status(f"[bold dim cyan]⠧ [Agent-X] Processing ⟶ Iteration {loop_n}...[/]", spinner="bouncingBar", console=console):
+        # --- 1. NEURAL PROCESSING (AI THINKING) ---
+        with Status(f"[bold dim cyan]⠧ Neural processing ⟶ Iteration {loop_n}...[/]", spinner="bouncingBar", console=console):
             try: 
                 resp = api_call(history)
             except Exception as e:
@@ -159,22 +178,38 @@ def agent(user_msg: str, history: List[Dict]):
                 return
         
         try:
-            msg = resp["choices"]["message"]
+            msg = resp["choices"][0]["message"]
         except (KeyError, IndexError, TypeError):
             console.print(f"\n  [error]✗ API Response Error! Got unexpected data:[/error]")
             console.print(f"  [dim]{resp}[/dim]\n")
             return
 
         tool_calls = msg.get("tool_calls") or []
+        content = msg.get("content") or ""
+        
+        # --- MAGIC FALLBACK: Rescue text-based tool calls ---
+        if not tool_calls and content:
+            fallback = extract_fallback_tools(content)
+            if fallback:
+                tool_calls = fallback
+                msg["tool_calls"] = tool_calls  # Append to history so loop works
+
         history.append(msg)
 
-        if msg.get("content"):
-            console.print(Panel(msg["content"].strip(), title="[bold white] 󰚩 AGENT-X [/bold white]", border_style="white", padding=(0,2)))
+        # Print AI Reasoning Box
+        if content:
+            # Clean up the output so raw markdown tool blocks aren't displayed directly to user
+            clean_content = re.sub(r'```(?:bash|sh|web_browse|tool_code).*?```', '', content, flags=re.DOTALL|re.IGNORECASE)
+            clean_content = re.sub(r'web_browse\([\'"].*?[\'"]\)', '', clean_content).strip()
+            if clean_content:
+                console.print(Panel(clean_content, title="[bold white] 󰚩 AGENT-X [/bold white]", border_style="white", padding=(0,2)))
 
+        # Break loop ONLY if there are truly no tools to run
         if not tool_calls:
-            console.print(f"  [success]✓ Operation concluded in {loop_n} steps.[/success]\n")
+            console.print(f"  [success]󰄬 Task concluded in {loop_n} iterations.[/success]\n")
             break
 
+        # --- 2. TOOL EXECUTION (WAITING & RUNNING) ---
         for tc in tool_calls:
             tc_name = tc["function"]["name"]
             try: tc_args = json.loads(tc["function"]["arguments"])
@@ -187,16 +222,18 @@ def agent(user_msg: str, history: List[Dict]):
             else:
                 console.print(f"    [dim]URL ⟶ {tc_args.get('url', '')}[/dim]")
             
-            with Status(f"[bold yellow]⠼ Executing {tc_name}...[/]", spinner="dots", console=console):
+            # This is the execution animation you wanted!
+            with Status(f"[bold yellow]⠼ Awaiting {tc_name} result...[/]", spinner="dots", console=console):
                 result = dispatch_tool(tc_name, tc_args)
             
             is_err = result.startswith("[ERROR]") or result.startswith("[exit")
             border = "red" if is_err else "cyan"
             title = "[error]󰅙 STDERR[/error]" if is_err else "[dim]󰄬 STDOUT[/dim]"
             
-            console.print(Panel(result[:1500] + ("\n...[truncated]" if len(result)>1500 else ""), 
-                                title=title, border_style=border))
+            # Print the tool output
+            console.print(Panel(result[:1500] + ("\n...[truncated]" if len(result)>1500 else ""), title=title, border_style=border))
             
+            # Pass output back to AI history for continuous loop
             history.append({"role": "tool", "tool_call_id": tc.get("id", f"call_{loop_n}"), "content": result})
 
 if __name__ == "__main__":
