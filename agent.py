@@ -2,7 +2,7 @@
 """
   ────────────────────────────────────────────────────────
     ⚡ AGENT-X :: S-CLASS INFINITE LOOP EDITION ⚡
-    True Autonomy | Smart Tool Detection | Pro Terminal UI
+    True Autonomy | Smart Tool Detection | Auto-Continue
   ────────────────────────────────────────────────────────
 """
 import json
@@ -13,10 +13,13 @@ import re
 import uuid
 from typing import List, Dict
 
+# ------------ AUTO-INSTALL DEPS ------------
+
 def _install_deps():
     print("Installing requirements...")
     subprocess.run(
-        [sys.executable, "-m", "pip", "install", "-q", "rich", "requests", "cloudscraper", "--break-system-packages"],
+        [sys.executable, "-m", "pip", "install", "-q",
+         "rich", "requests", "cloudscraper", "--break-system-packages"],
         capture_output=True
     )
 
@@ -40,7 +43,8 @@ except ImportError:
     import requests
     import cloudscraper
 
-# S-Class Theme
+# ------------ CONFIG & THEME ------------
+
 custom_theme = Theme({
     "system": "dim white",
     "tool": "bold cyan",
@@ -54,6 +58,12 @@ CFG = {
     "model": "claude-3-5-sonnet-20240620",
     "max_iter": 100,
     "sleep": 1.5
+}
+
+# Auto-continue state
+AUTO = {
+    "remaining": 0,
+    "template": "continue"
 }
 
 SYSTEM = """You are AGENT-X, an elite, fully autonomous AI on a Linux terminal.
@@ -75,13 +85,13 @@ RULES:
    https://example.com
    ```
 
-4. Every time the user asks you to investigate something, you MUST actually use tools.
-5. NEVER stop after just planning. You must:
+4. When user asks for analysis or investigation, you MUST actually use tools, not just plan.
+5. For each step:
    - run tools,
    - read outputs,
    - decide next tools,
-   - repeat until the root problem is fully analyzed.
-6. Only give a final summary AFTER you are satisfied you have gone deep enough.
+   - repeat until the root problem is deeply analyzed.
+6. Only give a final summary AFTER you are satisfied that the investigation is complete.
 """
 
 TOOLS = [
@@ -89,7 +99,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "bash",
-            "description": "Execute terminal commands natively (curl, nmap, python, etc.)",
+            "description": "Execute terminal commands (curl, nmap, python, etc.)",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -205,16 +215,16 @@ def extract_fallback_tools(content: str) -> List[Dict]:
     # ```tool_code  bash\n <cmd> ```
     for match in re.finditer(r'```tool_code\s*bash\s*(.*?)```', content, re.DOTALL | re.IGNORECASE):
         block = match.group(1)
-        # first non-empty line is command
         cmd = block.strip()
-        tools.append({
-            "id": f"call_{uuid.uuid4().hex[:8]}",
-            "type": "function",
-            "function": {
-                "name": "bash",
-                "arguments": json.dumps({"command": cmd})
-            }
-        })
+        if cmd:
+            tools.append({
+                "id": f"call_{uuid.uuid4().hex[:8]}",
+                "type": "function",
+                "function": {
+                    "name": "bash",
+                    "arguments": json.dumps({"command": cmd})
+                }
+            })
 
     # ```tool_code ... web_browse("url") ... ```
     for match in re.finditer(r'```tool_code\s*(.*?)```', content, re.DOTALL | re.IGNORECASE):
@@ -260,18 +270,35 @@ def handle_commands(user_input: str, history: List[Dict]) -> bool:
     cmd = user_input.split()
     if not cmd:
         return False
+
+    # /exit
     if cmd[0] == "/exit":
         console.print("  [system]⏻ Terminating session...[/system]\n")
         sys.exit(0)
+
+    # /new
     if cmd[0] == "/new":
         history.clear()
         history.append({"role": "system", "content": SYSTEM})
+        AUTO["remaining"] = 0
         console.print("  [success]↻ Memory wiped. Ready for new task.[/success]\n")
         return True
+
+    # /model base_url model_name
     if cmd[0] == "/model" and len(cmd) >= 3:
         CFG["base_url"], CFG["model"] = cmd[1], cmd[2]
         console.print(f"  [system]⚙ Config updated -> {CFG['model']}[/system]\n")
         return True
+
+    # /continue-N  → N auto messages "continue"
+    if cmd[0].startswith("/continue"):
+        parts = cmd[0].split("-")
+        if len(parts) == 2 and parts[1].isdigit():
+            AUTO["remaining"] = int(parts[1])
+            AUTO["template"] = "continue"
+            console.print(f"  [system]▶ Auto-continue armed for {AUTO['remaining']} steps.[/system]\n")
+            return True
+
     return False
 
 # ------------ CORE AGENT LOOP ------------
@@ -317,7 +344,7 @@ def agent(user_msg: str, history: List[Dict]):
 
         history.append(msg)
 
-        # SHOW AI THOUGHTS (text cleaned of raw code blocks)
+        # SHOW AI THOUGHTS (cleaned text)
         if content:
             clean = re.sub(r'```.*?```', '', content, flags=re.DOTALL).strip()
             if clean:
@@ -330,14 +357,23 @@ def agent(user_msg: str, history: List[Dict]):
                     )
                 )
 
-        # NO TOOLS: decide whether to stop or force another iteration
+        # NO TOOLS: decide whether to stop or keep looping
         if not tool_calls:
             low = content.lower()
-            if any(word in low for word in ["final", "summary", "recommendation", "conclusion", "in short"]):
+            if any(phrase in low for phrase in [
+                "task completed", "operation concluded",
+                "final", "summary", "recommendation", "conclusion", "in short"
+            ]):
                 console.print(f"  [success]󰄬 Task concluded in {loop_n} iterations.[/success]\n")
-                break
+                # 3s delay + optional auto-follow-up
+                time.sleep(3)
+                if AUTO["remaining"] > 0:
+                    AUTO["remaining"] -= 1
+                    console.print(f"  [system]⟶ Auto follow-up: {AUTO['template']} (remaining {AUTO['remaining']})[/system]")
+                    agent(AUTO["template"], history)
+                return
             else:
-                # Model sirf planning kar raha hai, force another thinking step
+                # sirf planning ho rahi hai, ek aur iteration chalao
                 continue
 
         # TOOL EXECUTION PHASE
@@ -382,7 +418,7 @@ def agent(user_msg: str, history: List[Dict]):
                 )
             )
 
-            # tool output goes back to model
+            # tool output -> model
             history.append({
                 "role": "tool",
                 "tool_call_id": tc.get("id", f"call_{loop_n}"),
@@ -402,8 +438,14 @@ if __name__ == "__main__":
     history: List[Dict] = [{"role": "system", "content": SYSTEM}]
     while True:
         try:
-            user_input = Prompt.ask("\n  [bold cyan]❯[/bold cyan]").strip()
+            if AUTO["remaining"] > 0:
+                user_input = AUTO["template"]
+                AUTO["remaining"] -= 1
+                console.print(f"\n  [system]⟶ Auto: {user_input} (remaining {AUTO['remaining']})[/system]")
+            else:
+                user_input = Prompt.ask("\n  [bold cyan]❯[/bold cyan]").strip()
         except (KeyboardInterrupt, EOFError):
             sys.exit(0)
+
         if user_input:
             agent(user_input, history)
