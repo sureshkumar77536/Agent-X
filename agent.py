@@ -683,7 +683,5 @@ if __name__ == "__main__":
         
         if user_input:
             agent(user_input, history)
-```
 
----
 
